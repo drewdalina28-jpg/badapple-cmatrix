@@ -404,15 +404,16 @@
          }
      }
  
-@@ -474,6 +822,7 @@
+@@ -474,6 +822,8 @@
      signal(SIGQUIT, sighandler);
      signal(SIGWINCH, sighandler);
      signal(SIGTSTP, sighandler);
 +    signal(SIGHUP, sighandler);
++    signal(SIGTERM, sighandler);
  #endif
  
  if (console) {
-@@ -540,10 +889,40 @@
+@@ -540,10 +890,40 @@
  
      var_init();
  
@@ -450,11 +451,11 @@
          /* Check for signals */
 -        if (signal_status == SIGINT || signal_status == SIGQUIT) {
 +        if (signal_status == SIGINT || signal_status == SIGQUIT ||
-+            signal_status == SIGHUP) {
++            signal_status == SIGHUP || signal_status == SIGTERM) {
              if (lock != 1)
                  finish();
              /* exits */
-@@ -862,9 +1241,14 @@
+@@ -862,9 +1242,14 @@
              }
          }
  
@@ -471,7 +472,7 @@
              int msg_x = LINES/2;
              int msg_y = COLS/2 - strlen(msg)/2;
              int i = 0;
-@@ -888,7 +1272,9 @@
+@@ -888,7 +1273,9 @@
                  addch(' ');
          }
  
