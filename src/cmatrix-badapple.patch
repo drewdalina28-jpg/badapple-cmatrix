@@ -1,0 +1,484 @@
+--- /data/data/com.termux/files/usr/tmp/cmatrix-master/cmatrix.c	2023-12-09 13:52:26.000000000 +0800
++++ cmatrix-master/cmatrix.c	2026-10-21 21:35:12.925747131 +0800
+@@ -27,10 +27,14 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <stdarg.h>
++#include <stdint.h>
+ #include <string.h>
+ #include <time.h>
+ #include <sys/types.h>
+ #include <sys/stat.h>
++#include <sys/socket.h>
++#include <sys/un.h>
++#include <sys/wait.h>
+ #include <fcntl.h>
+ #include <signal.h>
+ #include <locale.h>
+@@ -104,8 +108,11 @@
+     return system(buf);
+ }
+ 
++static void ba_audio_stop(void);
++
+ /* What we do when we're all set to exit */
+ void finish(void) {
++    ba_audio_stop();
+     curs_set(1);
+     clear();
+     refresh();
+@@ -168,6 +175,9 @@
+     printf(" -m: lambda mode\n");
+     printf(" -k: Characters change while scrolling. (Works without -o opt.)\n");
+     printf(" -t [tty]: Set tty to use\n");
++    printf(" -P [movie]: Play a .bpam movie (e.g. Bad Apple!!) over the matrix\n");
++    printf(" -N: Movie only, full screen, no matrix rain (use with -P)\n");
++    printf(" -S [audio]: Audio track to play in sync with the movie (use with -P)\n");
+ }
+ 
+ void version(void) {
+@@ -177,6 +187,332 @@
+     printf("Web: https://github.com/abishekvashok/cmatrix\n");
+ }
+ 
++/* ---------------------------------------------------------------------------
++ * Bad Apple movie playback.
++ *
++ * A movie file is a header followed by 4-bit grayscale frames (see render.py).
++ * Frames are drawn on top of the matrix rain, so you get the classic Bad
++ * Apple!! animation playing inside the Matrix.
++ *
++ * The animation is clocked from the audio when one is playing: mpv is asked
++ * for its playback position over its IPC socket, which lets the picture lock
++ * to the music exactly instead of merely running alongside it.
++ * ------------------------------------------------------------------------- */
++
++static unsigned char *ba_data = NULL;
++static uint32_t ba_w = 0, ba_h = 0, ba_nframes = 0, ba_frame_us = 50000;
++static uint32_t ba_frame = 0;
++static int ba_mode = 0;            /* 0 = off, 1 = window over rain, 2 = fullscreen */
++static long long ba_t0 = 0;        /* movie clock origin, microseconds */
++static pid_t ba_audio_pid = -1;
++static char ba_ipc_path[128] = { 0 };
++static const char ba_ramp[] = ".:-=+*#%@";
++#define BA_INK 96                  /* gray level where artwork starts */
++#define BA_MARGIN_W 4              /* room left for rain in window mode */
++#define BA_MARGIN_H 2
++#define BA_HDR_SIZE 24
++
++static long long ba_now_us(void) {
++    struct timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return (long long)ts.tv_sec * 1000000LL + ts.tv_nsec / 1000;
++}
++
++/* Load a .bpam movie file into memory. Returns 0 on success. */
++static int ba_load(const char *path) {
++    FILE *f;
++    unsigned char hdr[BA_HDR_SIZE];
++    uint32_t version, w, h, fus, n;
++    size_t fsz, total;
++
++    f = fopen(path, "rb");
++    if (!f) {
++        fprintf(stderr, "cmatrix: cannot open movie '%s': %s\n", path,
++                strerror(errno));
++        return -1;
++    }
++    if (fread(hdr, 1, sizeof(hdr), f) != sizeof(hdr) ||
++        memcmp(hdr, "BPAM", 4) != 0) {
++        fprintf(stderr, "cmatrix: '%s' is not a badapple movie file\n", path);
++        fclose(f);
++        return -1;
++    }
++    memcpy(&version, hdr + 4, 4);
++    memcpy(&w, hdr + 8, 4);
++    memcpy(&h, hdr + 12, 4);
++    memcpy(&fus, hdr + 16, 4);
++    memcpy(&n, hdr + 20, 4);
++    if (version != 2) {
++        fprintf(stderr, "cmatrix: movie '%s' has unsupported version %u\n", path,
++                version);
++        fclose(f);
++        return -1;
++    }
++    if (w == 0 || h == 0 || fus == 0 || n == 0) {
++        fprintf(stderr, "cmatrix: malformed movie header in '%s'\n", path);
++        fclose(f);
++        return -1;
++    }
++    fsz = ((size_t)w * h + 1) / 2;
++    total = fsz * n;
++    ba_data = malloc(total);
++    if (!ba_data) {
++        fprintf(stderr, "cmatrix: out of memory loading movie\n");
++        fclose(f);
++        return -1;
++    }
++    if (fread(ba_data, 1, total, f) != total) {
++        fprintf(stderr, "cmatrix: truncated movie file '%s'\n", path);
++        free(ba_data);
++        ba_data = NULL;
++        fclose(f);
++        return -1;
++    }
++    fclose(f);
++    ba_w = w;
++    ba_h = h;
++    ba_frame_us = fus;
++    ba_nframes = n;
++    return 0;
++}
++
++/* Draw the current frame, fitted to the terminal, keeping the aspect ratio. */
++static void ba_draw(int bold, int mcolor) {
++    int tw = (int)ba_w, th = (int)ba_h;
++    int avail_w, avail_h, ox, oy, tx, ty;
++    size_t fsz;
++    const unsigned char *frame;
++
++    if (!ba_data)
++        return;
++
++    if (ba_mode == 2) {
++        avail_w = COLS;
++        avail_h = LINES;
++    } else {
++        avail_w = COLS - BA_MARGIN_W;
++        avail_h = LINES - BA_MARGIN_H;
++        if (avail_w < 8)
++            avail_w = COLS;
++        if (avail_h < 8)
++            avail_h = LINES;
++    }
++    if (tw > avail_w) {
++        th = (int)((long)th * avail_w / tw);
++        tw = avail_w;
++    }
++    if (th > avail_h) {
++        tw = (int)((long)tw * avail_h / th);
++        th = avail_h;
++    }
++    if (tw < 1)
++        tw = 1;
++    if (th < 1)
++        th = 1;
++
++    ox = (COLS - tw) / 2;
++    oy = (LINES - th) / 2;
++
++    if (ba_mode == 2)
++        werase(stdscr);
++
++    fsz = ((size_t)ba_w * ba_h + 1) / 2;
++    frame = ba_data + (size_t)ba_frame * fsz;
++
++    for (ty = 0; ty < th; ty++) {
++        int sy0 = (int)((long)ty * ba_h / th);
++        int sy1 = (int)((long)(ty + 1) * ba_h / th);
++        if (sy1 <= sy0)
++            sy1 = sy0 + 1;
++        for (tx = 0; tx < tw; tx++) {
++            int sx0 = (int)((long)tx * ba_w / tw);
++            int sx1 = (int)((long)(tx + 1) * ba_w / tw);
++            int sum = 0, cnt = 0, gray, idx, level;
++            int sy, sx;
++
++            if (sx1 <= sx0)
++                sx1 = sx0 + 1;
++            for (sy = sy0; sy < sy1; sy++) {
++                size_t rowbase = (size_t)sy * ba_w;
++                for (sx = sx0; sx < sx1; sx++) {
++                    size_t p = rowbase + sx;
++                    unsigned char b = frame[p >> 1];
++                    sum += (p & 1) ? (b & 0x0F) : (b >> 4);
++                    cnt++;
++                }
++            }
++            gray = (sum * 17) / cnt;     /* 0 .. 255 */
++
++            if (gray < BA_INK) {
++                /* background: blank it out */
++                attrset(A_NORMAL);
++                move(oy + ty, ox + tx);
++                addch(' ');
++                continue;
++            }
++
++            idx = (gray - BA_INK) * 9 / (256 - BA_INK);
++            if (idx > 8)
++                idx = 8;
++            level = (idx >= 7) ? 3 : (idx >= 3 ? 2 : 1);
++
++            switch (level) {
++                case 3:
++                    attron(COLOR_PAIR(COLOR_WHITE));
++                    if (bold)
++                        attron(A_BOLD);
++                    break;
++                case 2:
++                    attron(COLOR_PAIR(mcolor));
++                    if (bold)
++                        attron(A_BOLD);
++                    break;
++                default:
++                    attron(COLOR_PAIR(mcolor));
++                    attron(A_DIM);
++                    break;
++            }
++            move(oy + ty, ox + tx);
++            addch(ba_ramp[idx]);
++            attrset(A_NORMAL);
++        }
++    }
++}
++
++/* Advance the movie clock and pick the frame for the current moment. */
++static void ba_tick(void) {
++    long long elapsed, index, next, now, sleep_us;
++
++    if (!ba_data)
++        return;
++    now = ba_now_us();
++    elapsed = now - ba_t0;
++    if (elapsed < 0)
++        elapsed = 0;
++    index = elapsed / ba_frame_us;
++    ba_frame = (uint32_t)(index % (long long)ba_nframes);
++
++    /* sleep until the next frame is due */
++    next = ba_t0 + (index + 1) * ba_frame_us;
++    sleep_us = next - ba_now_us();
++    if (sleep_us > 0)
++        usleep((useconds_t)sleep_us);
++}
++
++/* --------------------------------------------------------------------------
++ * Audio. The picture is clocked from the sound, so mpv is asked for its
++ * playback position over its IPC socket. Whatever mpv reports as "position 0"
++ * becomes the origin of the movie clock, which keeps the two locked together
++ * (and looping in step) for as long as it runs.
++ * ------------------------------------------------------------------------ */
++
++static void ba_audio_stop(void) {
++    if (ba_audio_pid > 0) {
++        kill(ba_audio_pid, SIGTERM);
++        waitpid(ba_audio_pid, NULL, WNOHANG);
++        ba_audio_pid = -1;
++    }
++    if (ba_ipc_path[0]) {
++        unlink(ba_ipc_path);
++        ba_ipc_path[0] = '\0';
++    }
++}
++
++/* Start looping the audio in the background. Returns the child pid or -1. */
++static pid_t ba_audio_spawn(const char *path) {
++    pid_t pid = fork();
++
++    if (pid < 0)
++        return -1;
++    if (pid == 0) {
++        int fd = open("/dev/null", O_RDWR);
++        char ipcarg[160];
++        if (fd >= 0) {
++            dup2(fd, STDIN_FILENO);
++            dup2(fd, STDOUT_FILENO);
++            dup2(fd, STDERR_FILENO);
++            if (fd > 2)
++                close(fd);
++        }
++        if (ba_ipc_path[0]) {
++            snprintf(ipcarg, sizeof(ipcarg), "--input-ipc-server=%s",
++                     ba_ipc_path);
++            execlp("mpv", "mpv", "--no-video", "--no-terminal", "--really-quiet",
++                   "--loop=inf", ipcarg, path, (char *) NULL);
++        } else {
++            execlp("mpv", "mpv", "--no-video", "--no-terminal", "--really-quiet",
++                   "--loop=inf", path, (char *) NULL);
++        }
++        /* fall back to vlc */
++        execlp("vlc", "vlc", "--intf", "dummy", "--no-video", "--loop", path,
++               (char *) NULL);
++        _exit(127);
++    }
++    return pid;
++}
++
++/* Ask mpv for its playback position over the IPC socket. Returns 0 on success. */
++static int ba_ipc_timepos(double *out) {
++    struct sockaddr_un addr;
++    struct timeval tv;
++    char req[] = "{\"command\":[\"get_property\",\"time-pos\"]}\n";
++    char resp[512];
++    const char *p;
++    ssize_t n;
++    int fd;
++
++    fd = socket(AF_UNIX, SOCK_STREAM, 0);
++    if (fd < 0)
++        return -1;
++    memset(&addr, 0, sizeof(addr));
++    addr.sun_family = AF_UNIX;
++    strncpy(addr.sun_path, ba_ipc_path, sizeof(addr.sun_path) - 1);
++    if (connect(fd, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
++        close(fd);
++        return -1;
++    }
++    tv.tv_sec = 0;
++    tv.tv_usec = 300000;
++    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
++    if (write(fd, req, strlen(req)) < 0) {
++        close(fd);
++        return -1;
++    }
++    n = read(fd, resp, sizeof(resp) - 1);
++    close(fd);
++    if (n <= 0)
++        return -1;
++    resp[n] = '\0';
++    p = strstr(resp, "\"data\":");
++    if (!p)
++        return -1;
++    p += 7;
++    *out = strtod(p, NULL);
++    return 0;
++}
++
++/* Wait for mpv to report a position, then align the movie clock to it. */
++static void ba_audio_sync(void) {
++    double pos = 0.0;
++    int tries;
++
++    for (tries = 0; tries < 40; tries++) {
++        if (ba_ipc_timepos(&pos) == 0 && pos > 0.02)
++            break;
++        usleep(100000);
++    }
++    if (pos > 0.02) {
++        /* the media was at position 0 this long ago */
++        ba_t0 = ba_now_us() - (long long)(pos * 1000000.0);
++    } else {
++        /* no IPC: fall back to a fixed guess at the startup delay */
++        const char *d = getenv("BADAPPLE_AUDIO_DELAY");
++        long delay_ms = d ? atol(d) : 350;
++        usleep((useconds_t)delay_ms * 1000);
++        ba_t0 = ba_now_us();
++    }
++}
++
+ 
+ /* nmalloc from nano by Big Gaute */
+ void *nmalloc(size_t howmuch) {
+@@ -333,13 +669,15 @@
+     int changes = 0;
+     char *msg = "";
+     char *tty = NULL;
++    char *movie = NULL;
++    char *audio = NULL;
+ 
+     srand((unsigned) time(NULL));
+     setlocale(LC_ALL, "");
+ 
+     /* Many thanks to morph- (morph@jmss.com) for this getopt patch */
+     opterr = 0;
+-    while ((optchr = getopt(argc, argv, "abBcfhlLnrosmxkVM:u:C:t:")) != EOF) {
++    while ((optchr = getopt(argc, argv, "abBcfhlLnrosmxkVM:u:C:t:P:N:S:")) != EOF) {
+         switch (optchr) {
+         case 's':
+             screensaver = 1;
+@@ -428,6 +766,16 @@
+         case 't':
+             tty = optarg;
+             break;
++        case 'P':
++            movie = optarg;
++            ba_mode = 1;
++            break;
++        case 'N':
++            ba_mode = 2;
++            break;
++        case 'S':
++            audio = optarg;
++            break;
+         }
+     }
+ 
+@@ -474,6 +822,7 @@
+     signal(SIGQUIT, sighandler);
+     signal(SIGWINCH, sighandler);
+     signal(SIGTSTP, sighandler);
++    signal(SIGHUP, sighandler);
+ #endif
+ 
+ if (console) {
+@@ -540,10 +889,40 @@
+ 
+     var_init();
+ 
++    if (ba_mode && movie) {
++        if (ba_load(movie) != 0) {
++            finish();
++            exit(EXIT_FAILURE);
++        }
++        fprintf(stderr, "cmatrix: playing %s (%ux%u, %u frames)\n", movie,
++                ba_w, ba_h, ba_nframes);
++    } else {
++        ba_mode = 0;
++    }
++
++    if (ba_mode && audio) {
++        const char *tmp = getenv("TMPDIR");
++        if (!tmp || !*tmp)
++            tmp = "/tmp";
++        snprintf(ba_ipc_path, sizeof(ba_ipc_path), "%s/badapple-mpv-%d.sock",
++                 tmp, (int) getpid());
++        unlink(ba_ipc_path);
++        ba_audio_pid = ba_audio_spawn(audio);
++        if (ba_audio_pid < 0) {
++            fprintf(stderr, "cmatrix: could not start the audio player\n");
++            ba_ipc_path[0] = '\0';
++        } else {
++            ba_audio_sync();
++        }
++    } else {
++        ba_t0 = ba_now_us();
++    }
++
+     while (1) {
+ #ifndef _WIN32
+         /* Check for signals */
+-        if (signal_status == SIGINT || signal_status == SIGQUIT) {
++        if (signal_status == SIGINT || signal_status == SIGQUIT ||
++            signal_status == SIGHUP) {
+             if (lock != 1)
+                 finish();
+             /* exits */
+@@ -862,9 +1241,14 @@
+             }
+         }
+ 
++        /* Bad Apple: advance the movie clock and paint the frame over the rain */
++        if (ba_mode) {
++            ba_tick();
++            ba_draw(bold, mcolor);
++        }
++
+         //check if -M and/or -L was used
+-        if (msg[0] != '\0') {
+-            //Add our message to the screen
++        if (msg[0] != '\0') {            //Add our message to the screen
+             int msg_x = LINES/2;
+             int msg_y = COLS/2 - strlen(msg)/2;
+             int i = 0;
+@@ -888,7 +1272,9 @@
+                 addch(' ');
+         }
+ 
+-        napms(update * 10);
++        if (!ba_mode) {
++            napms(update * 10);
++        }
+     }
+     finish();
+ }

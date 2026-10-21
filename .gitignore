@@ -1,0 +1,16 @@
+# built binary
+src/cmatrix-badapple
+
+# generated movie + soundtrack (see the releases page)
+badapple.bpam
+badapple_audio.m4a
+
+# source video
+*.webm
+*.mp4
+*.mkv
+
+# misc
+*.o
+*.log
+__pycache__/

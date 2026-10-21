@@ -1,0 +1,48 @@
+#!/bin/sh
+# Bad Apple!! played inside the Matrix, rendered by a patched cmatrix.
+#
+#   badapple              play in a window with the rain falling around it
+#   badapple -N           fullscreen movie, no rain
+#   badapple --no-audio   picture only
+#   badapple -C red       different rain colour
+#   badapple -b           bold characters
+#
+# Any other flag is passed straight through to cmatrix-badapple.
+
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+BIN="${BADAPPLE_BIN:-$HERE/src/cmatrix-badapple}"
+MOVIE="${BADAPPLE_MOVIE:-$HERE/badapple.bpam}"
+AUDIO="${BADAPPLE_AUDIO:-$HERE/badapple_audio.m4a}"
+
+if [ ! -x "$BIN" ]; then
+    echo "badapple: $BIN is missing - run ./install.sh first" >&2
+    exit 1
+fi
+if [ ! -f "$MOVIE" ]; then
+    echo "badapple: movie file $MOVIE is missing." >&2
+    echo "         get it with:  ./install.sh --download" >&2
+    echo "         or make it with: ./install.sh --render <video>" >&2
+    exit 1
+fi
+
+# pick --no-audio / -S out of the argument list (portable, keeps quoting)
+want_audio=1
+have_audio=0
+n=$#
+i=0
+while [ "$i" -lt "$n" ]; do
+    a="$1"
+    shift
+    i=$((i + 1))
+    case "$a" in
+        --no-audio) want_audio=0 ;;
+        -S|-S*) have_audio=1; set -- "$@" "$a" ;;
+        *) set -- "$@" "$a" ;;
+    esac
+done
+
+if [ "$want_audio" -eq 1 ] && [ "$have_audio" -eq 0 ] && [ -f "$AUDIO" ]; then
+    exec "$BIN" -P "$MOVIE" -S "$AUDIO" "$@"
+fi
+exec "$BIN" -P "$MOVIE" "$@"
