@@ -4,6 +4,8 @@ The Bad Apple!! animation, rendered as ASCII and played by a patched
 [cmatrix](https://github.com/abishekvashok/cmatrix) — with the original
 soundtrack, and the Matrix rain falling around the artwork.
 
+![Bad Apple!! playing inside cmatrix](demo.svg)
+
 ```
    ___  _        _              _                 _
   / _ )(_)______(_) ___  _ __ | |__  _ __  ___  | |
@@ -144,6 +146,9 @@ terminals, at the cost of disk and RAM.
   copyrighted material: the movie and soundtrack are distributed as release
   assets, and you are welcome to build your own from whatever video you
   like with `tools/make_movie.sh`.
+* `demo.svg` is a recording of this program made with
+  [asciinema](https://asciinema.org) and
+  [termtosvg](https://github.com/nbedos/termtosvg).
 
 ## License
 

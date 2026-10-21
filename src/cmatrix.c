@@ -823,6 +823,7 @@ int main(int argc, char *argv[]) {
     signal(SIGWINCH, sighandler);
     signal(SIGTSTP, sighandler);
     signal(SIGHUP, sighandler);
+    signal(SIGTERM, sighandler);
 #endif
 
 if (console) {
@@ -922,7 +923,7 @@ if (console) {
 #ifndef _WIN32
         /* Check for signals */
         if (signal_status == SIGINT || signal_status == SIGQUIT ||
-            signal_status == SIGHUP) {
+            signal_status == SIGHUP || signal_status == SIGTERM) {
             if (lock != 1)
                 finish();
             /* exits */
