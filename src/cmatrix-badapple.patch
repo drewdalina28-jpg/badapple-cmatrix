@@ -1,5 +1,5 @@
---- /data/data/com.termux/files/usr/tmp/cmatrix-master/cmatrix.c	2023-12-09 13:52:26.000000000 +0800
-+++ cmatrix-master/cmatrix.c	2026-10-21 21:35:12.925747131 +0800
+--- a/cmatrix.c
++++ b/cmatrix.c
 @@ -27,10 +27,14 @@
  #include <stdio.h>
  #include <stdlib.h>

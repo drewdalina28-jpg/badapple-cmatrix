@@ -1,0 +1,54 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libncurses-dev libncursesw5-dev ffmpeg python3
+
+      - name: Build cmatrix-badapple
+        working-directory: src
+        run: |
+          gcc -O2 -Wall -o cmatrix-badapple cmatrix.c -lncursesw -lm
+
+      - name: The patch still applies to upstream cmatrix
+        run: |
+          git clone --depth 1 https://github.com/abishekvashok/cmatrix.git /tmp/cmatrix
+          cd /tmp/cmatrix
+          git apply --check "$GITHUB_WORKSPACE/src/cmatrix-badapple.patch"
+        # upstream may move on; the patched source is shipped as well
+        continue-on-error: true
+
+      - name: Render smoke test
+        run: |
+          ffmpeg -v error -y -f lavfi -i testsrc=size=320x240:rate=10 \
+            -t 2 -pix_fmt yuv420p /tmp/test.mp4
+          python3 tools/render.py /tmp/test.mp4 /tmp/test.bpam \
+            --width 60 --height 45 --fps 10 --duration 2
+          python3 - <<'PY'
+          import struct
+          d = open('/tmp/test.bpam', 'rb').read(24)
+          magic, ver, w, h, fus, n = struct.unpack('<4sIIIII', d)
+          assert magic == b'BPAM', magic
+          assert ver == 2, ver
+          assert (w, h) == (60, 45), (w, h)
+          assert fus > 0 and n > 0, (fus, n)
+          print(f"movie ok: {n} frames, {fus} us/frame, {n * fus / 1e6:.2f}s")
+          PY
+
+      - name: Shell scripts are valid
+        run: |
+          sh -n badapple
+          sh -n install.sh
+          sh -n tools/make_movie.sh
