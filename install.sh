@@ -32,8 +32,19 @@ install_deps() {
     [ -n "$need" ] || { say "all dependencies present"; return; }
 
     if have pkg; then          # Termux
-        say "installing with pkg:$need"
-        pkg install $need || die "pkg install failed"
+        # Termux names its packages differently from Debian: the C compiler
+        # is "clang" (the gcc command is a symlink to it) and the python3
+        # interpreter comes from the "python" package.
+        pkgs=""
+        for p in $need; do
+            case "$p" in
+                gcc)     pkgs="$pkgs clang" ;;
+                python3) pkgs="$pkgs python" ;;
+                *)       pkgs="$pkgs $p" ;;
+            esac
+        done
+        say "installing with pkg:$pkgs"
+        pkg install $pkgs || die "pkg install failed"
     elif have apt-get; then     # Debian / Ubuntu
         sudo apt-get update
         sudo apt-get install -y build-essential ffmpeg python3 curl libncurses-dev mpv \
