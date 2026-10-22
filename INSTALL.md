@@ -262,7 +262,7 @@ Anything the launcher does not recognise is passed straight through to
 `cmatrix-badapple`, so the usual cmatrix flags all still work. Run
 `./src/cmatrix-badapple -h` for the complete list.
 
-Two environment variables change how it behaves:
+Environment variables change how it behaves:
 
 | variable | meaning |
 | --- | --- |
