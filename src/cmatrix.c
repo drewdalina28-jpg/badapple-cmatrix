@@ -677,7 +677,7 @@ int main(int argc, char *argv[]) {
 
     /* Many thanks to morph- (morph@jmss.com) for this getopt patch */
     opterr = 0;
-    while ((optchr = getopt(argc, argv, "abBcfhlLnrosmxkVM:u:C:t:P:N:S:")) != EOF) {
+    while ((optchr = getopt(argc, argv, "abBcfhlLnrosmxkVM:u:C:t:P:NS:")) != EOF) {
         switch (optchr) {
         case 's':
             screensaver = 1;
