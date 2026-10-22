@@ -27,6 +27,10 @@ cd badapple-cmatrix
 and mpv), builds the patched cmatrix, and downloads the pre-rendered movie
 and soundtrack from the [latest release](https://github.com/drewdalina28-jpg/badapple-cmatrix/releases).
 
+Need more? [INSTALL.md](INSTALL.md) is the full installation guide: per
+platform instructions, building by hand, rendering your own movie, every
+option, troubleshooting and uninstalling.
+
 Then:
 
 ```
@@ -125,6 +129,8 @@ terminals, at the cost of disk and RAM.
 * `ffmpeg` and `python3` (to build a movie)
 * `mpv` (or `vlc`) for the soundtrack
 * Linux, macOS or Termux on Android
+
+See [INSTALL.md](INSTALL.md) for how to install these on each platform.
 
 ## Notes
 
